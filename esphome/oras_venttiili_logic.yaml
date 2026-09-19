@@ -1,0 +1,254 @@
+substitutions:
+  pulse_duration: 16ms
+  wake_delay: 2ms
+  settle_delay: 2ms
+  command_lockout: 1500ms
+  remote_command_lockout: 5s
+  local_button_boot_lockout: 3s
+
+esphome:
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_off: drv_ain1
+      - output.turn_off: drv_ain2
+      - output.turn_off: drv_slp
+      - output.turn_off: status_led
+      - lambda: |-
+          id(command_busy) = false;
+          id(local_button_ready) = false;
+          id(remote_command_guard_active) = true;
+      - script.execute: publish_valve_state
+      - script.execute: remote_command_guard_timer
+      - script.execute: local_button_enable_timer
+
+logger:
+  baud_rate: 115200
+
+output:
+  - platform: gpio
+    id: drv_ain1
+    pin:
+      number: GPIO25
+      mode:
+        output: true
+
+  - platform: gpio
+    id: drv_ain2
+    pin:
+      number: GPIO26
+      mode:
+        output: true
+
+  - platform: gpio
+    id: drv_slp
+    pin:
+      number: GPIO27
+      mode:
+        output: true
+
+  - platform: gpio
+    id: status_led
+    pin:
+      number: GPIO33
+      mode:
+        output: true
+
+globals:
+  - id: command_busy
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: valve_state_code
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: remote_command_guard_active
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
+  - id: local_button_ready
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+text_sensor:
+  - platform: template
+    id: valve_state_estimate
+    name: "Tila-arvio"
+    icon: "mdi:valve"
+    update_interval: never
+    lambda: |-
+      if (id(valve_state_code) == 1) {
+        return {"auki_arvio"};
+      }
+      if (id(valve_state_code) == 2) {
+        return {"kiinni_arvio"};
+      }
+      if (id(valve_state_code) == 3) {
+        return {"tuntematon_lepotila"};
+      }
+      return {"tuntematon"};
+
+  - platform: template
+    id: last_accepted_command
+    name: "Viimeisin hyvaksytty komento"
+    icon: "mdi:check-circle-outline"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: last_rejected_command
+    name: "Viimeisin hylatty komento"
+    icon: "mdi:alert-circle-outline"
+    entity_category: diagnostic
+    update_interval: never
+
+script:
+  - id: publish_valve_state
+    mode: restart
+    then:
+      - component.update: valve_state_estimate
+      - if:
+          condition:
+            lambda: "return id(valve_state_code) == 1;"
+          then:
+            - output.turn_on: status_led
+          else:
+            - output.turn_off: status_led
+
+  - id: remote_command_guard_timer
+    mode: restart
+    then:
+      - delay: ${remote_command_lockout}
+      - lambda: "id(remote_command_guard_active) = false;"
+      - logger.log:
+          level: INFO
+          format: "Remote command guard cleared"
+
+  - id: local_button_enable_timer
+    mode: restart
+    then:
+      - delay: ${local_button_boot_lockout}
+      - lambda: "id(local_button_ready) = true;"
+      - logger.log:
+          level: INFO
+          format: "Local button enabled"
+
+  - id: valve_force_idle
+    mode: restart
+    then:
+      - script.stop: valve_drive
+      - output.turn_off: drv_ain1
+      - output.turn_off: drv_ain2
+      - delay: ${settle_delay}
+      - output.turn_off: drv_slp
+      - lambda: |-
+          id(command_busy) = false;
+          id(valve_state_code) = 3;
+      - script.execute: publish_valve_state
+      - logger.log:
+          level: INFO
+          format: "DRV8833 forced idle"
+
+  - id: valve_drive
+    mode: single
+    parameters:
+      open_direction: bool
+      local_command: bool
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const char *requested_name = open_direction ? "avaa" : "sulje";
+              if (!local_command && id(remote_command_guard_active)) {
+                ESP_LOGW("oras_venttiili", "Valve command ignored: remote command guard active");
+                id(last_rejected_command).publish_state(std::string(requested_name) + ": API reconnect guard");
+                return false;
+              }
+              if (id(command_busy)) {
+                ESP_LOGW("oras_venttiili", "Valve command ignored: command lockout active");
+                id(last_rejected_command).publish_state(std::string(requested_name) + ": busy");
+                return false;
+              }
+              return true;
+          then:
+            - lambda: "id(command_busy) = true;"
+            - output.turn_off: drv_ain1
+            - output.turn_off: drv_ain2
+            - output.turn_off: drv_slp
+            - delay: ${settle_delay}
+            - output.turn_on: drv_slp
+            - delay: ${wake_delay}
+            - if:
+                condition:
+                  lambda: "return open_direction;"
+                then:
+                  - logger.log:
+                      level: INFO
+                      format: "OPEN pulse: VALKOINEN_PLUS for 16 ms"
+                  - output.turn_on: drv_ain1
+                  - output.turn_off: drv_ain2
+                  - delay: ${pulse_duration}
+                  - output.turn_off: drv_ain1
+                  - lambda: |-
+                      id(valve_state_code) = 1;
+                      id(last_accepted_command).publish_state(local_command ? "avaa: paikallinen" : "avaa: api");
+                  - script.execute: publish_valve_state
+                else:
+                  - logger.log:
+                      level: INFO
+                      format: "CLOSE pulse: SININEN_PLUS for 16 ms"
+                  - output.turn_off: drv_ain1
+                  - output.turn_on: drv_ain2
+                  - delay: ${pulse_duration}
+                  - output.turn_off: drv_ain2
+                  - lambda: |-
+                      id(valve_state_code) = 2;
+                      id(last_accepted_command).publish_state(local_command ? "sulje: paikallinen" : "sulje: api");
+                  - script.execute: publish_valve_state
+            - delay: ${settle_delay}
+            - output.turn_off: drv_ain1
+            - output.turn_off: drv_ain2
+            - output.turn_off: drv_slp
+            - delay: ${command_lockout}
+            - lambda: "id(command_busy) = false;"
+
+binary_sensor:
+  - platform: gpio
+    id: local_button
+    name: "Paikallinen painike"
+    entity_category: diagnostic
+    pin:
+      number: GPIO32
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - if:
+          condition:
+            lambda: "return id(local_button_ready);"
+          then:
+            - if:
+                condition:
+                  lambda: "return id(valve_state_code) == 2;"
+                then:
+                  - script.execute:
+                      id: valve_drive
+                      open_direction: true
+                      local_command: true
+                else:
+                  - script.execute:
+                      id: valve_drive
+                      open_direction: false
+                      local_command: true
+          else:
+            - lambda: |-
+                id(last_rejected_command).publish_state("painike: boot guard");
