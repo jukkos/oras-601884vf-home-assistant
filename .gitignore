@@ -1,0 +1,29 @@
+# ESPHome secrets / local configuration
+secrets.yaml
+*.secrets.yaml
+.env
+.env.*
+
+# ESPHome build/cache
+.esphome/
+.pioenvs/
+.piolibdeps/
+.pio/
+build/
+
+# Logs / captures
+*.log
+*.txt
+capture_*.py
+serial_capture_*
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
