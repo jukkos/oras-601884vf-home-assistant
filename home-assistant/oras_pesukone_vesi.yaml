@@ -1,0 +1,160 @@
+# Home Assistant automation: Oras water valve follows washing machine load safely.
+#
+# Paste this over the existing automation "Oras venttiili - pesukoneen vesi".
+#
+# Washing machine entity:
+# - sensor.tekninen_tila_emporia_vue_ryhmakeskus_pesukone_teho
+#
+# Oras entities/actions:
+# - esphome.oras_venttiili_avaa
+# - esphome.oras_venttiili_sulje
+# - sensor.oras_venttiili_tila_arvio
+#
+# Required helper:
+# - input_boolean.oras_pesukone_vesi_automaatti_auki
+#
+# Safety notes:
+# - Home Connect Power/unavailable is not used.
+# - Emporia current is not used as a required close condition.
+# - The valve is closed only if this automation previously opened it.
+# - Manual valve use from HA or Apple Home does not trigger this automation.
+# - The helper is changed only after ESPHome publishes the expected estimate.
+# - If Oras is unavailable, this automation does not try to move the valve.
+
+id: "1789207069844"
+alias: Oras venttiili - pesukoneen vesi
+description: Avaa ja sulkee Oras-venttiilin Emporia-tehomittauksen perusteella.
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.tekninen_tila_emporia_vue_ryhmakeskus_pesukone_teho
+    above: 5
+    for: "00:00:10"
+    id: avaa_teho
+
+  - trigger: numeric_state
+    entity_id: sensor.tekninen_tila_emporia_vue_ryhmakeskus_pesukone_teho
+    below: 2
+    for: "00:15:00"
+    id: sulje_teho_matala
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: avaa_teho
+          - condition: state
+            entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            state: "off"
+          - condition: state
+            entity_id: sensor.oras_venttiili_tila_arvio
+            state: "auki_arvio"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+
+      - conditions:
+          - condition: trigger
+            id: avaa_teho
+          - condition: state
+            entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            state: "off"
+          - condition: template
+            value_template: "{{ states('sensor.tekninen_tila_emporia_vue_ryhmakeskus_pesukone_teho') | float(0) > 5 }}"
+          - condition: template
+            value_template: "{{ states('sensor.oras_venttiili_tila_arvio') not in ['unavailable', 'unknown'] }}"
+          - condition: not
+            conditions:
+              - condition: state
+                entity_id: sensor.oras_venttiili_tila_arvio
+                state: "auki_arvio"
+        sequence:
+          - action: esphome.oras_venttiili_avaa
+          - wait_template: "{{ is_state('sensor.oras_venttiili_tila_arvio', 'auki_arvio') }}"
+            timeout: "00:00:20"
+            continue_on_timeout: true
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: sensor.oras_venttiili_tila_arvio
+                    state: "auki_arvio"
+                sequence:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            default:
+              - action: persistent_notification.create
+                data:
+                  title: Oras-venttiili
+                  message: "Pesukoneen teho nousi, mutta Oras-venttiilin avaus ei varmistunut Tila-arvio-sensorista."
+
+      - conditions:
+          - condition: trigger
+            id: avaa_teho
+          - condition: state
+            entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            state: "off"
+          - condition: template
+            value_template: "{{ states('sensor.oras_venttiili_tila_arvio') in ['unavailable', 'unknown'] }}"
+        sequence:
+          - action: persistent_notification.create
+            data:
+              title: Oras-venttiili
+              message: "Pesukoneen teho nousi, mutta Oras ESPHome ei ollut saatavilla. Venttiilia ei avattu automaattisesti."
+
+      - conditions:
+          - condition: trigger
+            id: sulje_teho_matala
+          - condition: state
+            entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            state: "on"
+          - condition: template
+            value_template: "{{ states('sensor.oras_venttiili_tila_arvio') in ['unavailable', 'unknown'] }}"
+        sequence:
+          - action: persistent_notification.create
+            data:
+              title: Oras-venttiili
+              message: "Pesukoneen teho oli matala, mutta Oras ESPHome ei ollut saatavilla. Venttiilia ei suljettu automaattisesti."
+
+      - conditions:
+          - condition: trigger
+            id: sulje_teho_matala
+          - condition: state
+            entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            state: "on"
+          - condition: template
+            value_template: "{{ states('sensor.tekninen_tila_emporia_vue_ryhmakeskus_pesukone_teho') | float(999) < 2 }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: sensor.oras_venttiili_tila_arvio
+                    state: "kiinni_arvio"
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+            default:
+              - action: esphome.oras_venttiili_sulje
+              - wait_template: "{{ is_state('sensor.oras_venttiili_tila_arvio', 'kiinni_arvio') }}"
+                timeout: "00:00:20"
+                continue_on_timeout: true
+              - choose:
+                  - conditions:
+                      - condition: state
+                        entity_id: sensor.oras_venttiili_tila_arvio
+                        state: "kiinni_arvio"
+                    sequence:
+                      - action: input_boolean.turn_off
+                        target:
+                          entity_id: input_boolean.oras_pesukone_vesi_automaatti_auki
+                default:
+                  - action: persistent_notification.create
+                    data:
+                      title: Oras-venttiili
+                      message: "Pesukoneen teho oli matala, mutta Oras-venttiilin sulku ei varmistunut Tila-arvio-sensorista."

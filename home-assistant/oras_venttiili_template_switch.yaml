@@ -1,0 +1,34 @@
+# Home Assistant template switch for the Oras valve.
+#
+# Use this as the replacement model for the existing "Oras venttiili ohjaus"
+# template switch before exposing the valve to HomeKit. Do not add it beside the
+# old helper with the same purpose; replace the old helper or use the same field
+# values in the UI.
+#
+# Why this version exists:
+# - "unavailable" and "unknown" are not treated as "closed".
+# - Manual open/close commands are forwarded even if the estimate already
+#   claims the same state, because Tila-arvio is not a physical position sensor.
+# - Commands are not forwarded while the ESPHome state sensor is unavailable.
+# - ESPHome buttons are not used; the firmware exposes API actions instead,
+#   so HomeKit cannot discover and press raw Avaa/Sulje button entities.
+
+template:
+  - switch:
+      - name: "Oras venttiili ohjaus"
+        unique_id: oras_venttiili_ohjaus
+        icon: mdi:valve
+        availability: >
+          {{ states('sensor.oras_venttiili_tila_arvio') in ['auki_arvio', 'kiinni_arvio'] }}
+        state: >
+          {{ is_state('sensor.oras_venttiili_tila_arvio', 'auki_arvio') }}
+        turn_on:
+          - condition: template
+            value_template: >
+              {{ states('sensor.oras_venttiili_tila_arvio') not in ['unavailable', 'unknown'] }}
+          - action: esphome.oras_venttiili_avaa
+        turn_off:
+          - condition: template
+            value_template: >
+              {{ states('sensor.oras_venttiili_tila_arvio') not in ['unavailable', 'unknown'] }}
+          - action: esphome.oras_venttiili_sulje
